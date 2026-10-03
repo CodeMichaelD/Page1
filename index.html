@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Clouds</title>
+    <style>
+        /* Reset margins and hide scrollbars for clean iframe embedding */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #87CEEB; /* Sky blue fallback */
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Import Map allows us to use ES modules directly from a CDN without bundlers -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Scene Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        // Slightly lower pixel ratio for better performance in iframes
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+        document.body.appendChild(renderer.domElement);
+
+        // --- Shaders ---
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            precision highp float;
+            varying vec2 vUv;
+            uniform float uTime;
+            uniform vec2 uResolution;
+
+            // Hash functions for noise generation
+            float hash(vec3 p) {
+                p = fract(p * 0.3183099 + 0.1);
+                p *= 17.0;
+                return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+            }
+
+            // 3D Value Noise
+            float noise(vec3 x) {
+                vec3 i = floor(x);
+                vec3 f = fract(x);
+                f = f * f * (3.0 - 2.0 * f);
+                
+                return mix(mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
+                               mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+                           mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+                               mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+            }
+
+            // Fractal Brownian Motion (FBM) for cloud detail
+            float fbm(vec3 p) {
+                float f = 0.0;
+                f += 0.5000 * noise(p); p *= 2.02;
+                f += 0.2500 * noise(p); p *= 2.03;
+                f += 0.1250 * noise(p); p *= 2.01;
+                f += 0.0625 * noise(p);
+                return f / 0.9375;
+            }
+
+            // Cloud density function
+            float mapClouds(vec3 p) {
+                // Move the domain over time to simulate wind
+                vec3 q = p - vec3(0.0, 0.1, 1.0) * uTime;
+                
+                // Base shape
+                float f = fbm(q);
+                
+                // Detail distortion
+                f = fbm(q + 2.0 * f);
+                
+                // Define cloud layer boundaries
+                float heightFade = 1.0 - smoothstep(0.0, 4.0, abs(p.y - 2.0));
+                
+                return max(0.0, f - 0.5) * heightFade;
+            }
+
+            void main() {
+                vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution.xy) / uResolution.y;
+
+                // Camera setup
+                vec3 ro = vec3(0.0, 2.0, 0.0); // Ray origin
+                vec3 rd = normalize(vec3(uv, 1.0)); // Ray direction
+
+                // Sky gradient
+                vec3 col = mix(vec3(0.5, 0.7, 1.0), vec3(0.2, 0.4, 0.8), max(0.0, rd.y));
+                
+                // Sun position and color
+                vec3 sunDir = normalize(vec3(0.5, 0.4, -0.7));
+                float sun = clamp(dot(sunDir, rd), 0.0, 1.0);
+                col += vec3(1.0, 0.8, 0.5) * pow(sun, 64.0) * 0.5;
+                col += vec3(1.0, 0.6, 0.3) * pow(sun, 8.0) * 0.2;
+
+                // Raymarching setup
+                float t = 0.0;
+                float transmittance = 1.0;
+                vec3 scatteredLight = vec3(0.0);
+
+                // March through the volume
+                for (int i = 0; i < 64; i++) {
+                    if (transmittance < 0.01 || t > 20.0) break;
+
+                    vec3 pos = ro + rd * t;
+                    float density = mapClouds(pos);
+
+                    if (density > 0.01) {
+                        // Simple lighting (sun absorption)
+                        float lightDensity = mapClouds(pos + sunDir * 0.5);
+                        
+                        // Beer-Lambert law for light attenuation
+                        float absorption = exp(-density * 0.8);
+                        
+                        // Mix of direct sunlight and ambient sky light
+                        vec3 lighting = mix(vec3(0.6, 0.7, 0.8), vec3(1.0, 0.95, 0.8), pow(sun, 2.0));
+                        lighting *= exp(-lightDensity * 2.0); 
+                        
+                        // Accumulate color
+                        scatteredLight += transmittance * density * lighting * 0.15;
+                        transmittance *= absorption;
+                    }
+
+                    // Step size increases slightly with distance for performance
+                    t += 0.15 + t * 0.02;
+                }
+
+                // Composite clouds over sky
+                col = col * transmittance + scatteredLight;
+
+                // Tone mapping and gamma correction
+                col = 1.0 - exp(-col * 1.5);
+                col = pow(col, vec3(0.4545));
+
+                gl_FragColor = vec4(col, 1.0);
+            }
+        `;
+
+        // --- Material & Mesh ---
+        const uniforms = {
+            uTime: { value: 0.0 },
+            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+        };
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms
+        });
+
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+        scene.add(quad);
+
+        // --- Animation Loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            uniforms.uTime.value = clock.getElapsedTime() * 0.5;
+            
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // --- Resize Handling ---
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
