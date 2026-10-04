@@ -2,200 +2,898 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Clouds</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Ethereal Flight - Serene Exploration</title>
     <style>
-        /* Reset margins and hide scrollbars for clean iframe embedding */
-        body, html {
+        body {
             margin: 0;
             padding: 0;
-            width: 100%;
-            height: 100%;
             overflow: hidden;
-            background-color: #87CEEB; /* Sky blue fallback */
+            background-color: #1a1a2e;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none;
         }
-        canvas {
+        #webgl {
+            width: 100vw;
+            height: 100vh;
             display: block;
         }
+        #ui {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            color: rgba(255, 255, 255, 0.9);
+            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+            pointer-events: none;
+            user-select: none;
+        }
+        #ui h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+        #ui p {
+            margin: 5px 0 0 0;
+            font-size: 14px;
+            opacity: 0.8;
+        }
+        #controls-info {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.7);
+            text-align: center;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+            pointer-events: none;
+            transition: opacity 2s ease-out;
+            font-size: 13px;
+            background: rgba(0,0,0,0.3);
+            padding: 8px 16px;
+            border-radius: 20px;
+            backdrop-filter: blur(4px);
+            white-space: nowrap;
+        }
+        #landing-prompt {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 18px;
+            background: rgba(0,0,0,0.6);
+            padding: 12px 24px;
+            border-radius: 30px;
+            opacity: 0;
+            transition: opacity 0.5s;
+            pointer-events: none;
+            text-shadow: 0 0 10px cyan;
+        }
+        .mobile-zone {
+            position: absolute;
+            bottom: 0;
+            height: 100%;
+            width: 50%;
+            z-index: 10;
+        }
+        #zone-left { left: 0; }
+        #zone-right { right: 0; }
     </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
 </head>
 <body>
+    <canvas id="webgl"></canvas>
+    
+    <div id="ui">
+        <h1>ETHEREAL FLIGHT</h1>
+        <p>Altitude: <span id="altitude">0</span>m | Speed: <span id="speed">0</span> km/h</p>
+    </div>
+    
+    <div id="landing-prompt">Press SPACE to Land</div>
 
-    <!-- Import Map allows us to use ES modules directly from a CDN without bundlers -->
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"
-        }
-    }
-    </script>
+    <div id="controls-info">
+        Desktop: Mouse to Look | W/S: Throttle | A/D: Strafe | Space/Shift: Up/Down<br>
+        Mobile: Left side to Look, Right side to Move
+    </div>
+
+    <div id="zone-left" class="mobile-zone"></div>
+    <div id="zone-right" class="mobile-zone"></div>
 
     <script type="module">
         import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-        // --- Scene Setup ---
-        const scene = new THREE.Scene();
-        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        
-        const renderer = new THREE.WebGLRenderer({ antialias: false });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        // Slightly lower pixel ratio for better performance in iframes
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-        document.body.appendChild(renderer.domElement);
-
-        // --- Shaders ---
-        const vertexShader = `
-            varying vec2 vUv;
-            void main() {
-                vUv = uv;
-                gl_Position = vec4(position, 1.0);
-            }
-        `;
-
-        const fragmentShader = `
-            precision highp float;
-            varying vec2 vUv;
-            uniform float uTime;
-            uniform vec2 uResolution;
-
-            // Hash functions for noise generation
-            float hash(vec3 p) {
-                p = fract(p * 0.3183099 + 0.1);
-                p *= 17.0;
-                return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-            }
-
-            // 3D Value Noise
-            float noise(vec3 x) {
-                vec3 i = floor(x);
-                vec3 f = fract(x);
-                f = f * f * (3.0 - 2.0 * f);
-                
-                return mix(mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
-                               mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
-                           mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
-                               mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
-            }
-
-            // Fractal Brownian Motion (FBM) for cloud detail
-            float fbm(vec3 p) {
-                float f = 0.0;
-                f += 0.5000 * noise(p); p *= 2.02;
-                f += 0.2500 * noise(p); p *= 2.03;
-                f += 0.1250 * noise(p); p *= 2.01;
-                f += 0.0625 * noise(p);
-                return f / 0.9375;
-            }
-
-            // Cloud density function
-            float mapClouds(vec3 p) {
-                // Move the domain over time to simulate wind
-                vec3 q = p - vec3(0.0, 0.1, 1.0) * uTime;
-                
-                // Base shape
-                float f = fbm(q);
-                
-                // Detail distortion
-                f = fbm(q + 2.0 * f);
-                
-                // Define cloud layer boundaries
-                float heightFade = 1.0 - smoothstep(0.0, 4.0, abs(p.y - 2.0));
-                
-                return max(0.0, f - 0.5) * heightFade;
-            }
-
-            void main() {
-                vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution.xy) / uResolution.y;
-
-                // Camera setup
-                vec3 ro = vec3(0.0, 2.0, 0.0); // Ray origin
-                vec3 rd = normalize(vec3(uv, 1.0)); // Ray direction
-
-                // Sky gradient
-                vec3 col = mix(vec3(0.5, 0.7, 1.0), vec3(0.2, 0.4, 0.8), max(0.0, rd.y));
-                
-                // Sun position and color
-                vec3 sunDir = normalize(vec3(0.5, 0.4, -0.7));
-                float sun = clamp(dot(sunDir, rd), 0.0, 1.0);
-                col += vec3(1.0, 0.8, 0.5) * pow(sun, 64.0) * 0.5;
-                col += vec3(1.0, 0.6, 0.3) * pow(sun, 8.0) * 0.2;
-
-                // Raymarching setup
-                float t = 0.0;
-                float transmittance = 1.0;
-                vec3 scatteredLight = vec3(0.0);
-
-                // March through the volume
-                for (int i = 0; i < 64; i++) {
-                    if (transmittance < 0.01 || t > 20.0) break;
-
-                    vec3 pos = ro + rd * t;
-                    float density = mapClouds(pos);
-
-                    if (density > 0.01) {
-                        // Simple lighting (sun absorption)
-                        float lightDensity = mapClouds(pos + sunDir * 0.5);
-                        
-                        // Beer-Lambert law for light attenuation
-                        float absorption = exp(-density * 0.8);
-                        
-                        // Mix of direct sunlight and ambient sky light
-                        vec3 lighting = mix(vec3(0.6, 0.7, 0.8), vec3(1.0, 0.95, 0.8), pow(sun, 2.0));
-                        lighting *= exp(-lightDensity * 2.0); 
-                        
-                        // Accumulate color
-                        scatteredLight += transmittance * density * lighting * 0.15;
-                        transmittance *= absorption;
-                    }
-
-                    // Step size increases slightly with distance for performance
-                    t += 0.15 + t * 0.02;
-                }
-
-                // Composite clouds over sky
-                col = col * transmittance + scatteredLight;
-
-                // Tone mapping and gamma correction
-                col = 1.0 - exp(-col * 1.5);
-                col = pow(col, vec3(0.4545));
-
-                gl_FragColor = vec4(col, 1.0);
-            }
-        `;
-
-        // --- Material & Mesh ---
-        const uniforms = {
-            uTime: { value: 0.0 },
-            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+        // --- Game State ---
+        const state = {
+            isFlying: true,
+            isLanded: false,
+            velocity: new THREE.Vector3(0, 0, 0),
+            targetVelocity: new THREE.Vector3(0, 0, 0),
+            rotationSpeed: 1.5,
+            targetPitch: 0,
+            targetYaw: 0,
+            targetRoll: 0,
+            touchLeft: { active: false, x: 0, y: 0, startX: 0, startY: 0 },
+            touchRight: { active: false, x: 0, y: 0, startX: 0, startY: 0 },
+            currentIslandIndex: -1,
+            islandPositions: [],
+            gravity: -9.8,
+            lift: 9.8,
+            throttle: 0,
         };
 
-        const material = new THREE.ShaderMaterial({
-            vertexShader,
-            fragmentShader,
-            uniforms
+        // --- Three.js Setup ---
+        const canvas = document.getElementById('webgl');
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x9bb8d3, 0.005);
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.set(0, 5, 15);
+
+        // --- Post Processing (Bloom for magical atmosphere) ---
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            1.0, // strength
+            0.5, // radius
+            0.85 // threshold
+        );
+        
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+        scene.add(hemiLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffeebb, 2.0);
+        dirLight.position.set(30, 50, 20);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.camera.left = -60;
+        dirLight.shadow.camera.right = 60;
+        dirLight.shadow.camera.top = 60;
+        dirLight.shadow.camera.bottom = -60;
+        scene.add(dirLight);
+
+        // --- Custom Sky Shader ---
+        const skyGeo = new THREE.BoxGeometry(3000, 3000, 3000);
+        const skyMat = new THREE.ShaderMaterial({
+            uniforms: {
+                topColor: { value: new THREE.Color(0x4a7c9e) },
+                bottomColor: { value: new THREE.Color(0xffc3a0) },
+                offset: { value: 200 },
+                exponent: { value: 0.7 }
+            },
+            vertexShader: `
+                varying vec3 vWorldPosition;
+                void main() {
+                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPosition.xyz;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 topColor;
+                uniform vec3 bottomColor;
+                uniform float offset;
+                uniform float exponent;
+                varying vec3 vWorldPosition;
+                void main() {
+                    float h = normalize(vWorldPosition + offset).y;
+                    gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
+                }
+            `,
+            side: THREE.BackSide,
+            depthWrite: false
+        });
+        const sky = new THREE.Mesh(skyGeo, skyMat);
+        scene.add(sky);
+
+        // --- Player Character (Humanoid with Wings) ---
+        const character = new THREE.Group();
+        
+        const skinMat = new THREE.MeshStandardMaterial({ color: 0xffccaa, roughness: 0.6 });
+        const clothMat = new THREE.MeshStandardMaterial({ color: 0x3366ff, roughness: 0.8 });
+        const pantsMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.9 });
+        const wingMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+
+        // Head
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), skinMat);
+        head.position.y = 1.0;
+        head.castShadow = true;
+        character.add(head);
+
+        // Hair
+        const hair = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 16, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x4a2e1b }));
+        hair.position.y = 1.05;
+        hair.castShadow = true;
+        character.add(hair);
+
+        // Torso
+        const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.3, 0.8, 8), clothMat);
+        torso.position.y = 0.4;
+        torso.castShadow = true;
+        character.add(torso);
+
+        // Arms
+        const armGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.6, 6);
+        const leftArm = new THREE.Mesh(armGeo, skinMat);
+        leftArm.position.set(-0.35, 0.5, 0);
+        leftArm.rotation.z = 0.2;
+        leftArm.castShadow = true;
+        character.add(leftArm);
+
+        const rightArm = new THREE.Mesh(armGeo, skinMat);
+        rightArm.position.set(0.35, 0.5, 0);
+        rightArm.rotation.z = -0.2;
+        rightArm.castShadow = true;
+        character.add(rightArm);
+
+        // Legs
+        const legGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.7, 6);
+        const leftLeg = new THREE.Mesh(legGeo, pantsMat);
+        leftLeg.position.set(-0.15, -0.3, 0);
+        leftLeg.castShadow = true;
+        character.add(leftLeg);
+
+        const rightLeg = new THREE.Mesh(legGeo, pantsMat);
+        rightLeg.position.set(0.15, -0.3, 0);
+        rightLeg.castShadow = true;
+        character.add(rightLeg);
+
+        // Wings
+        const wingGroupLeft = new THREE.Group();
+        const wingGroupRight = new THREE.Group();
+
+        function createWing() {
+            const wing = new THREE.Group();
+            const mainWing = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.4), wingMat);
+            mainWing.position.set(-0.6, 0, 0);
+            wing.add(mainWing);
+            for (let i = 0; i < 4; i++) {
+                const feather = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.6, 4), wingMat);
+                feather.position.set(-0.6 - (i * 0.25), 0, 0);
+                feather.rotation.z = Math.PI / 2;
+                feather.rotation.y = (i - 1.5) * 0.2;
+                wing.add(feather);
+            }
+            return wing;
+        }
+
+        wingGroupLeft.add(createWing());
+        wingGroupLeft.position.set(-0.3, 0.7, -0.15);
+        wingGroupLeft.rotation.y = Math.PI / 6;
+        character.add(wingGroupLeft);
+
+        wingGroupRight.add(createWing());
+        wingGroupRight.position.set(0.3, 0.7, -0.15);
+        wingGroupRight.rotation.y = -Math.PI / 6;
+        wingGroupRight.scale.x = -1;
+        character.add(wingGroupRight);
+
+        const playerPivot = new THREE.Group();
+        playerPivot.add(character);
+        scene.add(playerPivot);
+        playerPivot.position.y = 20;
+
+        // --- Island Generation Shader (Perlin Noise & Flat Top) ---
+        const noiseFunctions = `
+            vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+            vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+            float snoise(vec3 v) {
+                const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+                const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+                vec3 i  = floor(v + dot(v, C.yyy) );
+                vec3 x0 = v - i + dot(i, C.xxx) ;
+
+                vec3 g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min( g.xyz, l.zxy );
+                vec3 i2 = max( g.xyz, l.zxy );
+
+                vec3 x1 = x0 - i1 + C.xxx;
+                vec3 x2 = x0 - i2 + C.yyy;
+                vec3 x3 = x0 - D.yyy;
+
+                i = mod289(i);
+                vec4 p = permute( permute( permute(
+                            i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                          + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
+                          + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+
+                float n_ = 0.142857142857;
+                vec3  ns = n_ * D.wyz - D.xzx;
+
+                vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+                vec4 x_ = floor(j * ns.z);
+                vec4 y_ = floor(j - 7.0 * x_ );
+
+                vec4 x = x_ *ns.x + ns.yyyy;
+                vec4 y = y_ *ns.x + ns.yyyy;
+                vec4 h = 1.0 - abs(x) - abs(y);
+
+                vec4 b0 = vec4( x.xy, y.xy );
+                vec4 b1 = vec4( x.zw, y.zw );
+
+                vec4 s0 = floor(b0)*2.0 + 1.0;
+                vec4 s1 = floor(b1)*2.0 + 1.0;
+                vec4 sh = -step(h, vec4(0.0));
+
+                vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+                vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+
+                vec3 p0 = vec3(a0.xy,h.x);
+                vec3 p1 = vec3(a0.zw,h.y);
+                vec3 p2 = vec3(a1.xy,h.z);
+                vec3 p3 = vec3(a1.zw,h.w);
+
+                vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+                p0 *= norm.x;
+                p1 *= norm.y;
+                p2 *= norm.z;
+                p3 *= norm.w;
+
+                vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                m = m * m;
+                return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+            }
+        `;
+
+        const terrainVertexShader = `
+            uniform float uTime;
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying float vElevation;
+            varying float vNoise;
+
+            ${noiseFunctions}
+
+            void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vec3 pos = position;
+                
+                // Define the flat top threshold (assuming radius ~5)
+                float topThreshold = 2.0; 
+                
+                // Calculate Perlin noise
+                float n = snoise(pos * 0.4 + vec3(uTime * 0.05, 0.0, 0.0));
+                float n2 = snoise(pos * 1.2);
+                float combinedNoise = n * 0.7 + n2 * 0.3;
+                vNoise = combinedNoise;
+                
+                if (pos.y > topThreshold) {
+                    // Flatten the top completely for a flat grassy field
+                    pos.y = topThreshold + (pos.y - topThreshold) * 0.05;
+                } else {
+                    // Displace the bottom with strong noise to create rocky crags
+                    float displacement = combinedNoise * 1.5;
+                    // Smooth transition near the top
+                    float factor = smoothstep(topThreshold, topThreshold - 1.5, pos.y);
+                    pos += normal * displacement * factor;
+                }
+                
+                vElevation = pos.y;
+                vPosition = pos;
+                
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            }
+        `;
+
+        const terrainFragmentShader = `
+            uniform float uTime;
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying float vElevation;
+            varying float vNoise;
+
+            void main() {
+                // Colors
+                vec3 grassColor = vec3(0.35, 0.65, 0.25);
+                vec3 rockColor = vec3(0.45, 0.4, 0.35);
+                vec3 dirtColor = vec3(0.3, 0.2, 0.1);
+                vec3 mossColor = vec3(0.2, 0.5, 0.2);
+                
+                float topThreshold = 2.0;
+                
+                vec3 color;
+                if (vElevation > topThreshold - 0.1) {
+                    // Flat grassy top
+                    color = grassColor;
+                    // Add some subtle noise variation to the grass
+                    color += vNoise * 0.15;
+                } else {
+                    // Rocky bottom
+                    float mixFactor = smoothstep(topThreshold, topThreshold - 2.0, vElevation);
+                    color = mix(rockColor, dirtColor, vNoise * 0.5 + 0.5);
+                    color = mix(color, mossColor, mixFactor * 0.5);
+                }
+                
+                // Simple lighting
+                vec3 lightDir = normalize(vec3(1.0, 1.0, 0.5));
+                float diff = max(dot(vNormal, lightDir), 0.0);
+                vec3 ambient = vec3(0.4, 0.5, 0.6);
+                
+                gl_FragColor = vec4(color * (ambient + diff * 0.8), 1.0);
+            }
+        `;
+
+        const terrainMaterial = new THREE.ShaderMaterial({
+            vertexShader: terrainVertexShader,
+            fragmentShader: terrainFragmentShader,
+            uniforms: {
+                uTime: { value: 0 }
+            },
+            flatShading: true
         });
 
-        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
-        scene.add(quad);
+        // --- Environment Setup ---
+        const environmentObjects = [];
+        const islandCount = 12;
+
+        function createIsland() {
+            const group = new THREE.Group();
+            
+            // High segment count for smooth noise displacement
+            const terrainGeo = new THREE.SphereGeometry(8, 64, 64);
+            const terrain = new THREE.Mesh(terrainGeo, terrainMaterial);
+            terrain.castShadow = true;
+            terrain.receiveShadow = true;
+            group.add(terrain);
+
+            // Vegetation (Trees)
+            const treeCount = Math.floor(Math.random() * 8) + 5;
+            for (let i = 0; i < treeCount; i++) {
+                const treeGroup = new THREE.Group();
+                
+                const trunkGeo = new THREE.CylinderGeometry(0.15, 0.25, 2.0, 5);
+                const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5D4037, roughness: 0.9 });
+                const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+                trunk.position.y = 1.0;
+                trunk.castShadow = true;
+                treeGroup.add(trunk);
+
+                const leavesMat = new THREE.MeshStandardMaterial({ color: 0x2E7D32, flatShading: true, roughness: 0.8 });
+                for (let j = 0; j < 3; j++) {
+                    const coneGeo = new THREE.ConeGeometry(0.8 - j * 0.2, 1.0, 6);
+                    const cone = new THREE.Mesh(coneGeo, leavesMat);
+                    cone.position.y = 1.5 + j * 0.6;
+                    cone.castShadow = true;
+                    treeGroup.add(cone);
+                }
+
+                // Place trees only on the flat top (radius < 4)
+                const angle = Math.random() * Math.PI * 2;
+                const radius = Math.random() * 4;
+                treeGroup.position.set(
+                    Math.cos(angle) * radius,
+                    2.0, // Top surface threshold
+                    Math.sin(angle) * radius
+                );
+                treeGroup.scale.setScalar(0.8 + Math.random() * 0.7);
+                group.add(treeGroup);
+            }
+
+            // Add floating rocks around the island
+            for (let i = 0; i < 5; i++) {
+                const rockGeo = new THREE.DodecahedronGeometry(0.5 + Math.random() * 0.8);
+                const rockMat = new THREE.MeshStandardMaterial({ color: 0x777777, flatShading: true });
+                const rock = new THREE.Mesh(rockGeo, rockMat);
+                rock.position.set(
+                    (Math.random() - 0.5) * 15,
+                    (Math.random() - 0.5) * 8,
+                    (Math.random() - 0.5) * 15
+                );
+                rock.castShadow = true;
+                group.add(rock);
+            }
+
+            return group;
+        }
+
+        function initEnvironment() {
+            for (let i = 0; i < islandCount; i++) {
+                const island = createIsland();
+                
+                const angle = (i / islandCount) * Math.PI * 2;
+                const radius = 40 + Math.random() * 40;
+                
+                island.position.x = Math.cos(angle) * radius + (Math.random() - 0.5) * 30;
+                island.position.y = -10 + Math.random() * 25;
+                island.position.z = -i * 80 - Math.random() * 40;
+                
+                island.scale.setScalar(1.0 + Math.random() * 0.5);
+                island.rotation.y = Math.random() * Math.PI * 2;
+                
+                scene.add(island);
+                environmentObjects.push(island);
+                
+                state.islandPositions.push({
+                    position: island.position.clone(),
+                    radius: 8 * island.scale.x,
+                    topY: island.position.y + (2.0 * island.scale.x) // Approximate top Y
+                });
+            }
+        }
+
+        initEnvironment();
+
+        // --- Floating Particles (Atmosphere) ---
+        const particleCount = 3000;
+        const particleGeo = new THREE.BufferGeometry();
+        const particlePositions = new Float32Array(particleCount * 3);
+        const particleSizes = new Float32Array(particleCount);
+
+        for (let i = 0; i < particleCount; i++) {
+            particlePositions[i * 3] = (Math.random() - 0.5) * 200;
+            particlePositions[i * 3 + 1] = (Math.random() - 0.5) * 100;
+            particlePositions[i * 3 + 2] = (Math.random() - 0.5) * 300;
+            particleSizes[i] = Math.random() * 0.8 + 0.2;
+        }
+
+        particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+        particleGeo.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+        const particleMat = new THREE.PointsMaterial({
+            size: 0.4,
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.5,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            map: (() => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 64; canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+                gradient.addColorStop(0, 'rgba(255,255,255,1)');
+                gradient.addColorStop(1, 'rgba(255,255,255,0)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 64, 64);
+                return new THREE.CanvasTexture(canvas);
+            })()
+        });
+
+        const particles = new THREE.Points(particleGeo, particleMat);
+        scene.add(particles);
+
+        // --- Controls & Physics ---
+
+        // Desktop: Mouse Look
+        let mouseX = 0, mouseY = 0;
+        document.addEventListener('mousemove', (e) => {
+            if (state.isLanded) return;
+            mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+            mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
+            
+            // Map mouse to rotation targets
+            state.targetPitch = -mouseY * 0.5;
+            state.targetYaw = -mouseX * 0.5;
+            state.targetRoll = -mouseX * 0.8;
+        });
+
+        // Desktop: Keyboard
+        const keys = { w: false, a: false, s: false, d: false, shift: false, space: false, q: false, e: false };
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'w' || e.key === 'ArrowUp') keys.w = true;
+            if (e.key === 's' || e.key === 'ArrowDown') keys.s = true;
+            if (e.key === 'a' || e.key === 'ArrowLeft') keys.a = true;
+            if (e.key === 'd' || e.key === 'ArrowRight') keys.d = true;
+            if (e.key === 'q') keys.q = true;
+            if (e.key === 'e') keys.e = true;
+            if (e.key === 'Shift') keys.shift = true;
+            if (e.key === ' ') {
+                e.preventDefault();
+                toggleLanding();
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'w' || e.key === 'ArrowUp') keys.w = false;
+            if (e.key === 's' || e.key === 'ArrowDown') keys.s = false;
+            if (e.key === 'a' || e.key === 'ArrowLeft') keys.a = false;
+            if (e.key === 'd' || e.key === 'ArrowRight') keys.d = false;
+            if (e.key === 'q') keys.q = false;
+            if (e.key === 'e') keys.e = false;
+            if (e.key === 'Shift') keys.shift = false;
+        });
+
+        // Mobile: Split Screen Touch
+        const zoneLeft = document.getElementById('zone-left');
+        const zoneRight = document.getElementById('zone-right');
+        const landingPrompt = document.getElementById('landing-prompt');
+
+        function handleTouchStart(e, side) {
+            e.preventDefault();
+            const touch = e.changedTouches[0];
+            const data = side === 'left' ? state.touchLeft : state.touchRight;
+            data.active = true;
+            data.startX = touch.clientX;
+            data.startY = touch.clientY;
+            data.x = touch.clientX;
+            data.y = touch.clientY;
+
+            // Double tap right side to land
+            if (side === 'right' && e.timeStamp - (data.lastTap || 0) < 300) {
+                toggleLanding();
+            }
+            data.lastTap = e.timeStamp;
+        }
+
+        function handleTouchMove(e, side) {
+            e.preventDefault();
+            const touch = e.changedTouches[0];
+            const data = side === 'left' ? state.touchLeft : state.touchRight;
+            if (!data.active || state.isLanded) return;
+            data.x = touch.clientX;
+            data.y = touch.clientY;
+        }
+
+        function handleTouchEnd(e, side) {
+            e.preventDefault();
+            const data = side === 'left' ? state.touchLeft : state.touchRight;
+            data.active = false;
+            if (side === 'left') {
+                state.targetPitch = 0;
+                state.targetYaw = 0;
+                state.targetRoll = 0;
+            }
+        }
+
+        zoneLeft.addEventListener('touchstart', (e) => handleTouchStart(e, 'left'), { passive: false });
+        zoneLeft.addEventListener('touchmove', (e) => handleTouchMove(e, 'left'), { passive: false });
+        zoneLeft.addEventListener('touchend', (e) => handleTouchEnd(e, 'left'), { passive: false });
+
+        zoneRight.addEventListener('touchstart', (e) => handleTouchStart(e, 'right'), { passive: false });
+        zoneRight.addEventListener('touchmove', (e) => handleTouchMove(e, 'right'), { passive: false });
+        zoneRight.addEventListener('touchend', (e) => handleTouchEnd(e, 'right'), { passive: false });
+
+        // --- Landing Logic ---
+        function toggleLanding() {
+            if (state.isLanded) {
+                // Takeoff
+                state.isLanded = false;
+                state.isFlying = true;
+                state.velocity.y = 5;
+                landingPrompt.style.opacity = '0';
+            } else {
+                // Check if close enough to land
+                let canLand = false;
+                for (let i = 0; i < state.islandPositions.length; i++) {
+                    const island = state.islandPositions[i];
+                    const distXZ = Math.sqrt(
+                        Math.pow(playerPivot.position.x - island.position.x, 2) +
+                        Math.pow(playerPivot.position.z - island.position.z, 2)
+                    );
+                    
+                    if (distXZ < island.radius && playerPivot.position.y > island.topY - 5 && playerPivot.position.y < island.topY + 10) {
+                        canLand = true;
+                        state.currentIslandIndex = i;
+                        break;
+                    }
+                }
+
+                if (canLand) {
+                    state.isLanded = true;
+                    state.isFlying = false;
+                    state.velocity.set(0, 0, 0);
+                    
+                    const island = state.islandPositions[state.currentIslandIndex];
+                    playerPivot.position.x = island.position.x;
+                    playerPivot.position.z = island.position.z;
+                    playerPivot.position.y = island.topY + 1.5;
+                    
+                    playerPivot.rotation.set(0, 0, 0);
+                    character.rotation.set(0, 0, 0);
+                    
+                    landingPrompt.innerText = "Press SPACE to Takeoff";
+                    landingPrompt.style.opacity = '1';
+                    setTimeout(() => { landingPrompt.style.opacity = '0'; }, 2000);
+                } else {
+                    landingPrompt.innerText = "No flat ground nearby!";
+                    landingPrompt.style.opacity = '1';
+                    setTimeout(() => { 
+                        landingPrompt.style.opacity = '0'; 
+                        landingPrompt.innerText = "Press SPACE to Land";
+                    }, 1500);
+                }
+            }
+        }
 
         // --- Animation Loop ---
         const clock = new THREE.Clock();
+        let time = 0;
 
         function animate() {
             requestAnimationFrame(animate);
+            const delta = Math.min(clock.getDelta(), 0.1);
+            time += delta;
+
+            terrainMaterial.uniforms.uTime.value = time;
+
+            // 1. Process Inputs & Physics
+            if (state.isFlying) {
+                let inputPitch = state.targetPitch;
+                let inputYaw = state.targetYaw;
+                let inputRoll = state.targetRoll;
+
+                // Keyboard overrides
+                if (keys.w) inputPitch += 0.3;
+                if (keys.s) inputPitch -= 0.3;
+                if (keys.a) inputRoll += 0.3;
+                if (keys.d) inputRoll -= 0.3;
+                if (keys.q) inputYaw += 0.3;
+                if (keys.e) inputYaw -= 0.3;
+
+                // Mobile Touch handling
+                if (state.touchLeft.active) {
+                    const dx = (state.touchLeft.x - state.touchLeft.startX) / (window.innerWidth / 4);
+                    const dy = (state.touchLeft.y - state.touchLeft.startY) / (window.innerHeight / 4);
+                    inputYaw = -dx * 1.5;
+                    inputPitch = -dy * 0.8;
+                    inputRoll = -dx * 1.0;
+                }
+
+                // Smoothly interpolate rotations
+                playerPivot.rotation.x = THREE.MathUtils.lerp(playerPivot.rotation.x, inputPitch, 0.05);
+                playerPivot.rotation.y = THREE.MathUtils.lerp(playerPivot.rotation.y, inputYaw, 0.05);
+                playerPivot.rotation.z = THREE.MathUtils.lerp(playerPivot.rotation.z, inputRoll, 0.05);
+
+                // Throttle
+                let targetThrottle = 0;
+                if (keys.w || (state.touchRight.active && state.touchRight.y < state.touchRight.startY)) targetThrottle = 1.0;
+                if (keys.s || (state.touchRight.active && state.touchRight.y > state.touchRight.startY)) targetThrottle = -0.5;
+
+                // Vertical movement (Space/Shift)
+                let verticalInput = 0;
+                if (keys.space) verticalInput = 1.0;
+                if (keys.shift) verticalInput = -1.0;
+
+                // Apply forces
+                const forward = new THREE.Vector3(0, 0, -1).applyEuler(playerPivot.rotation);
+                const up = new THREE.Vector3(0, 1, 0).applyEuler(playerPivot.rotation);
+                
+                // Slow, controllable flight
+                const maxSpeed = 15.0;
+                const acceleration = 10.0;
+                
+                if (targetThrottle > 0) {
+                    state.velocity.addScaledVector(forward, acceleration * delta);
+                } else if (targetThrottle < 0) {
+                    state.velocity.addScaledVector(forward, -acceleration * 0.5 * delta);
+                }
+                
+                state.velocity.addScaledVector(up, verticalInput * acceleration * delta);
+
+                // Drag (makes it slow and controllable)
+                state.velocity.multiplyScalar(0.98);
+                
+                // Cap speed
+                if (state.velocity.length() > maxSpeed) {
+                    state.velocity.normalize().multiplyScalar(maxSpeed);
+                }
+
+                // Apply velocity
+                playerPivot.position.addScaledVector(state.velocity, delta);
+
+                // Update UI
+                document.getElementById('altitude').innerText = Math.floor(playerPivot.position.y);
+                document.getElementById('speed').innerText = Math.floor(state.velocity.length() * 3.6);
+
+                // Wing flapping animation based on throttle
+                const flapSpeed = 5 + state.velocity.length() * 0.5;
+                const flapAmount = Math.sin(time * flapSpeed) * 0.4;
+                wingGroupLeft.rotation.z = 0.2 + flapAmount;
+                wingGroupRight.rotation.z = -0.2 - flapAmount;
+
+            } else if (state.isLanded) {
+                // Walking mode
+                document.getElementById('speed').innerText = "0";
+                
+                const walkSpeed = 5.0 * delta;
+                const forward = new THREE.Vector3(0, 0, -1).applyEuler(playerPivot.rotation);
+                const right = new THREE.Vector3(1, 0, 0).applyEuler(playerPivot.rotation);
+
+                if (keys.w) character.position.addScaledVector(forward, walkSpeed);
+                if (keys.s) character.position.addScaledVector(forward, -walkSpeed);
+                if (keys.a) character.position.addScaledVector(right, -walkSpeed);
+                if (keys.d) character.position.addScaledVector(right, walkSpeed);
+
+                // Constrain to island bounds
+                const island = state.islandPositions[state.currentIslandIndex];
+                const distFromCenter = Math.sqrt(
+                    Math.pow(character.position.x, 2) + Math.pow(character.position.z, 2)
+                );
+                if (distFromCenter > island.radius - 1) {
+                    character.position.x = (character.position.x / distFromCenter) * (island.radius - 1);
+                    character.position.z = (character.position.z / distFromCenter) * (island.radius - 1);
+                }
+
+                // Idle wing animation
+                wingGroupLeft.rotation.z = 0.1 + Math.sin(time * 2) * 0.05;
+                wingGroupRight.rotation.z = -0.1 - Math.sin(time * 2) * 0.05;
+            }
+
+            // 2. Update Particles
+            const positions = particles.geometry.attributes.position.array;
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] += Math.sin(time + i) * 0.02;
+                positions[i * 3 + 1] += Math.cos(time + i) * 0.02;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // 3. Camera Follow
+            const targetCameraPos = new THREE.Vector3();
             
-            uniforms.uTime.value = clock.getElapsedTime() * 0.5;
-            
-            renderer.render(scene, camera);
+            if (state.isFlying) {
+                // Smooth chase camera
+                const offset = new THREE.Vector3(0, 3, 12).applyEuler(playerPivot.rotation);
+                targetCameraPos.copy(playerPivot.position).add(offset);
+                camera.position.lerp(targetCameraPos, 0.05);
+                
+                // Look slightly ahead of the player
+                const lookAtPos = playerPivot.position.clone().addScaledVector(new THREE.Vector3(0, 0, -1).applyEuler(playerPivot.rotation), 15);
+                camera.lookAt(lookAtPos);
+            } else {
+                // Orbit camera when landed
+                const angle = time * 0.1;
+                targetCameraPos.set(
+                    playerPivot.position.x + Math.sin(angle) * 10,
+                    playerPivot.position.y + 5,
+                    playerPivot.position.z + Math.cos(angle) * 10
+                );
+                camera.position.lerp(targetCameraPos, 0.05);
+                camera.lookAt(playerPivot.position);
+            }
+
+            // 4. Render
+            composer.render();
         }
 
-        animate();
-
-        // --- Resize Handling ---
+        // Handle Window Resize
         window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-            uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
         });
+
+        // Fade out controls info after 10 seconds
+        setTimeout(() => {
+            document.getElementById('controls-info').style.opacity = '0';
+        }, 10000);
+
+        // Start the game
+        animate();
 
     </script>
 </body>
